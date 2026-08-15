@@ -1,0 +1,52 @@
+{
+echo "========== RTX 5060 IDENTIFICATION =========="
+lspci -nn | grep -i nvidia
+lspci -nnk | grep -A4 -B2 -i nvidia
+
+echo
+echo "========== GPU PCI ADDRESS =========="
+lspci -Dnn | grep -i nvidia
+
+echo
+echo "========== GPU IOMMU GROUP =========="
+for dev in /sys/bus/pci/devices/*; do
+    if lspci -s "$(basename "$dev")" 2>/dev/null | grep -qi nvidia; then
+        echo "GPU: $(basename "$dev")"
+        readlink -f "$dev/iommu_group" 2>/dev/null
+        ls -l "$(dirname "$(readlink -f "$dev/iommu_group")")"/devices 2>/dev/null
+    fi
+done
+
+echo
+echo "========== VFIO =========="
+lsmod | grep vfio
+grep -RniE 'vfio|nvidia|nouveau' /etc/modprobe.d /etc/dracut.conf.d 2>/dev/null
+
+echo
+echo "========== KERNEL CMDLINE =========="
+cat /proc/cmdline
+
+echo
+echo "========== GPU DRIVER =========="
+for d in /sys/bus/pci/devices/*; do
+    if lspci -s "$(basename "$d")" 2>/dev/null | grep -qi nvidia; then
+        echo "===== $(basename "$d") ====="
+        cat "$d/vendor" 2>/dev/null
+        cat "$d/device" 2>/dev/null
+        readlink "$d/driver" 2>/dev/null
+    fi
+done
+
+echo
+echo "========== VM PCI DEVICES =========="
+for vm in $(virsh list --all --name | sed '/^$/d'); do
+    echo "===== $vm ====="
+    virsh dumpxml "$vm" | grep -A15 -B5 -E '<hostdev|<address type=.pci'
+done
+
+echo
+echo "========== QEMU VERSION =========="
+qemu-system-x86_64 --version
+virsh version
+
+} > /root/rtx5060-vfio.txt 2>&1
