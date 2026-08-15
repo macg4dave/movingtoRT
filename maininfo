@@ -1,0 +1,183 @@
+{
+echo "========== DATE =========="
+date
+
+echo
+echo "========== OS =========="
+cat /etc/redhat-release
+uname -a
+hostnamectl
+
+echo
+echo "========== KERNEL =========="
+uname -r
+cat /proc/cmdline
+
+echo
+echo "========== CPU =========="
+lscpu
+
+echo
+echo "========== PCI DEVICES =========="
+lspci -nn
+
+echo
+echo "========== PCI DEVICES + DRIVERS =========="
+lspci -nnk
+
+echo
+echo "========== NVIDIA =========="
+lspci -nn | grep -i -E 'nvidia|3d controller|vga|audio'
+nvidia-smi 2>&1
+
+echo
+echo "========== IOMMU =========="
+find /sys/kernel/iommu_groups/ -type l -printf '%p -> %l\n' 2>/dev/null
+
+echo
+echo "========== IOMMU KERNEL SETTINGS =========="
+cat /sys/module/intel_iommu/parameters/* 2>/dev/null
+cat /sys/module/amd_iommu/parameters/* 2>/dev/null
+
+echo
+echo "========== VFIO MODULES =========="
+lsmod | grep -E 'vfio|iommu'
+modinfo vfio-pci 2>&1
+
+echo
+echo "========== VFIO CONFIG =========="
+grep -RniE 'vfio|vfio-pci|ids=|iommu|intel_iommu|amd_iommu|pcie_acs' \
+    /etc/modprobe.d /etc/dracut.conf.d /etc/default/grub \
+    /etc/kernel/cmdline 2>/dev/null
+
+echo
+echo "========== DRACUT =========="
+ls -la /etc/dracut.conf.d/
+grep -RniE 'vfio|nouveau|nvidia|pci' /etc/dracut.conf.d/ 2>/dev/null
+
+echo
+echo "========== INITRAMFS =========="
+ls -lh /boot/initramfs-*.img
+
+echo
+echo "========== GRUB =========="
+grep -RniE 'GRUB_CMDLINE|iommu|vfio|acs|nouveau' \
+    /etc/default/grub /etc/grub.d/ 2>/dev/null
+
+echo
+echo "========== KERNEL MODULE CONFIG =========="
+find /etc/modprobe.d -maxdepth 1 -type f -print \
+    -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+
+echo
+echo "========== SYSTEMD VFIO =========="
+systemctl list-unit-files | grep -Ei 'vfio|qemu|libvirt'
+systemctl status libvirtd --no-pager 2>&1
+
+echo
+echo "========== QEMU =========="
+qemu-system-x86_64 --version
+rpm -qa | grep -Ei 'qemu|libvirt|virt-install|edk2|ovmf' | sort
+
+echo
+echo "========== LIBVIRT =========="
+virsh version
+virsh list --all
+
+echo
+echo "========== LIBVIRT NETWORKS =========="
+virsh net-list --all
+
+echo
+echo "========== LIBVIRT STORAGE POOLS =========="
+virsh pool-list --all
+
+echo
+echo "========== VM XML =========="
+for vm in $(virsh list --all --name | sed '/^$/d'); do
+    echo "===== VM: $vm ====="
+    virsh dumpxml "$vm"
+done
+
+echo
+echo "========== QEMU DISK FILES =========="
+find /var/lib/libvirt/images /var/lib/libvirt -type f \
+    \( -name '*.qcow2' -o -name '*.qcow' -o -name '*.raw' -o -name '*.img' \) \
+    -printf '%p %s bytes\n' 2>/dev/null
+
+echo
+echo "========== QEMU STORAGE =========="
+df -hT
+lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,UUID
+
+echo
+echo "========== MOUNTS =========="
+findmnt
+
+echo
+echo "========== NETWORK =========="
+ip -br addr
+ip -br link
+ip route
+ip -6 route
+
+echo
+echo "========== NETWORKMANAGER =========="
+nmcli connection show
+nmcli device status
+
+echo
+echo "========== NETWORK CONFIG =========="
+find /etc/NetworkManager/system-connections -type f \
+    -maxdepth 1 -print \
+    -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \; 2>/dev/null
+
+echo
+echo "========== FIREWALL =========="
+firewall-cmd --list-all 2>&1
+firewall-cmd --list-all-zones 2>&1
+
+echo
+echo "========== SELINUX =========="
+getenforce
+sestatus
+
+echo
+echo "========== REPOSITORIES =========="
+dnf repolist
+dnf module list 2>/dev/null
+
+echo
+echo "========== INSTALLED PACKAGES =========="
+rpm -qa | sort
+
+echo
+echo "========== ENABLED SERVICES =========="
+systemctl list-unit-files --state=enabled
+
+echo
+echo "========== CUSTOM SYSTEMD SERVICES =========="
+find /etc/systemd/system -type f -maxdepth 2 -print \
+    -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+
+echo
+echo "========== CRON =========="
+crontab -l 2>&1
+find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly \
+    -type f -maxdepth 1 -print 2>/dev/null
+
+echo
+echo "========== PODMAN =========="
+podman info 2>&1
+podman ps -a 2>&1
+podman network ls 2>&1
+podman volume ls 2>&1
+
+echo
+echo "========== DOCKER =========="
+docker info 2>&1
+docker ps -a 2>&1
+docker network ls 2>&1
+docker volume ls 2>&1
+
+} > /root/server-migration.txt 2>&1
