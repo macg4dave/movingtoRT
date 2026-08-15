@@ -1,0 +1,6 @@
+# ShellCheck configuration for this repository
+# Add any rule disables or adjustments below.
+# Example: exclude=SC1090,SC1091
+
+# No default disables configured. Run `shellcheck` and if there are repo-specific
+# false positives we can add them here.
