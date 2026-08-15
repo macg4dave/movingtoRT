@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 set -u
 set -o pipefail
+umask 077
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-./collected-info}"
-RUN_ID="${RUN_ID:-$(hostname -s 2>/dev/null || echo unknown)-$(date +%Y%m%d-%H%M%S)}"
+RUN_ID="${RUN_ID:-$(hostname -s 2>/dev/null || echo unknown)-$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}}"
 OUTPUT_DIR="${OUTPUT_ROOT%/}/${RUN_ID}"
-INCLUDE_SENSITIVE=0
 
-readonly REDACT_PATTERN='s/(password|passwd|psk|key|secret|token)=.*/\1=<redacted>/Ig'
+readonly SECRET_KEY_PATTERN='password|passwd|passphrase|psk|key|secret|token|credential|identity|private_key|client_secret|access_key|api_key'
 readonly GPU_PATTERN='nvidia|amd|radeon|intel|vga|3d controller|display'
 readonly VFIO_PATTERN='vfio|vfio-pci|ids=|driver_override|iommu|intel_iommu|amd_iommu|pcie_acs|nouveau|nvidia|rd.driver|modprobe|dracut|hostdev|vendor_id|device_id|pci-stub'
+readonly STATUS_FILE_NAME='manifest-command-status.tsv'
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/collect-info.sh [--output DIR] [--include-sensitive]
+Usage: scripts/collect-info.sh [--output DIR]
 
 Collect Rocky/RHEL host details into nested text files grouped by topic.
+Run as root so protected system configuration can be collected.
 
 Options:
   --output DIR          Base output directory. Default: ./collected-info
-  --include-sensitive  Also collect raw config files that may contain secrets.
   -h, --help           Show this help.
 USAGE
 }
@@ -35,10 +36,6 @@ parse_args() {
                 OUTPUT_ROOT="$2"
                 OUTPUT_DIR="${OUTPUT_ROOT%/}/${RUN_ID}"
                 shift 2
-                ;;
-            --include-sensitive)
-                INCLUDE_SENSITIVE=1
-                shift
                 ;;
             -h|--help)
                 usage
@@ -56,17 +53,28 @@ parse_args() {
 prepare_output_dir() {
     local dirs=(
         system cpu gpu storage network virtualization security services
-        packages containers kernel logs custom sensitive
+        packages containers kernel logs custom raw_config
     )
 
-    mkdir -p "$OUTPUT_DIR"
+    mkdir -p "$OUTPUT_ROOT"
+    if ! mkdir "$OUTPUT_DIR"; then
+        echo "Output directory already exists or could not be created: $OUTPUT_DIR" >&2
+        exit 1
+    fi
 
     local dir
     for dir in "${dirs[@]}"; do
-        mkdir -p "$OUTPUT_DIR/$dir"
+        mkdir "$OUTPUT_DIR/$dir"
     done
 
     chmod 700 "$OUTPUT_DIR" 2>/dev/null || true
+}
+
+require_root() {
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        echo "This script must be run as root to collect complete system information." >&2
+        exit 1
+    fi
 }
 
 write_manifest_start() {
@@ -74,8 +82,12 @@ write_manifest_start() {
         echo "Collection started: $(date -Is 2>/dev/null || date)"
         echo "Hostname: $(hostname 2>/dev/null || echo unknown)"
         echo "Output directory: $OUTPUT_DIR"
-        echo "Include sensitive: $INCLUDE_SENSITIVE"
+        echo "Run user: $(id -un 2>/dev/null || echo unknown)"
+        echo
+        echo "WARNING: raw_config/ may contain secrets. Review before sharing."
     } >"$OUTPUT_DIR/manifest.txt"
+
+    printf 'status\toutput_file\ttitle\n' >"$OUTPUT_DIR/$STATUS_FILE_NAME"
 }
 
 write_manifest_finish() {
@@ -83,12 +95,29 @@ write_manifest_finish() {
         echo
         echo "Collection finished: $(date -Is 2>/dev/null || date)"
         echo "Review output under: $OUTPUT_DIR"
+        echo
+        echo "Command status report:"
+        cat "$OUTPUT_DIR/$STATUS_FILE_NAME" 2>/dev/null || true
+        echo
+        echo "Review before sharing:"
+        echo "- Inspect raw_config/ for credentials, keys, certificates, tokens, and private host details."
+        echo "- Prefer sharing redacted topic files first; share raw_config/ only with trusted recipients."
+        echo "- Confirm VM XML, NetworkManager connections, repo files, and bootloader config do not expose secrets."
     } >>"$OUTPUT_DIR/manifest.txt"
+}
+
+record_capture_status() {
+    local outfile="$1"
+    local title="$2"
+    local status="$3"
+
+    printf '%s\t%s\t%s\n' "$status" "${outfile#"$OUTPUT_DIR"/}" "$title" >>"$OUTPUT_DIR/$STATUS_FILE_NAME"
 }
 
 capture_cmd() {
     local outfile="$1"
     local title="$2"
+    local status
     shift 2
 
     {
@@ -96,40 +125,48 @@ capture_cmd() {
         echo "Command: $*"
         echo
         "$@"
-        local status=$?
+        status=$?
         echo
         echo "Exit status: ${status}"
     } >"$outfile" 2>&1
+
+    record_capture_status "$outfile" "$title" "$status"
 }
 
 capture_shell() {
     local outfile="$1"
     local title="$2"
     local script="$3"
+    local status
 
     {
         echo "========== ${title} =========="
         echo
         bash -c "$script"
-        local status=$?
+        status=$?
         echo
         echo "Exit status: ${status}"
     } >"$outfile" 2>&1
+
+    record_capture_status "$outfile" "$title" "$status"
 }
 
 capture_function() {
     local outfile="$1"
     local title="$2"
+    local status
     shift 2
 
     {
         echo "========== ${title} =========="
         echo
         "$@"
-        local status=$?
+        status=$?
         echo
         echo "Exit status: ${status}"
     } >"$outfile" 2>&1
+
+    record_capture_status "$outfile" "$title" "$status"
 }
 
 copy_if_exists() {
@@ -148,16 +185,32 @@ redact_file() {
 
     if [ -f "$source" ]; then
         mkdir -p "$(dirname "$target")"
-        sed -E -e "$REDACT_PATTERN" -e 's/(802-1x\.password:).*/\1 <redacted>/Ig' \
-            "$source" >"$target" 2>"${target}.redact-error.txt" || true
+        redact_stream "$source" >"$target" 2>"${target}.redact-error.txt" || true
     fi
+}
+
+redact_stream() {
+    sed -E \
+        -e "s/((\"?(${SECRET_KEY_PATTERN})\"?[[:space:]]*[:=][[:space:]]*))\"[^\"]*\"/\\1\"<redacted>\"/Ig" \
+        -e "s/((${SECRET_KEY_PATTERN})[[:space:]]*[:=][[:space:]]*)'[^']*'/\\1'<redacted>'/Ig" \
+        -e "s/((${SECRET_KEY_PATTERN})[[:space:]]*[:=][[:space:]]*)[^[:space:],;}]+/\\1<redacted>/Ig" \
+        -e 's/(802-1x\.password:).*/\1 <redacted>/Ig' \
+        "$@" |
+        awk '
+            /-----BEGIN .*PRIVATE KEY-----/ { print "-----BEGIN REDACTED PRIVATE KEY-----"; in_pem=1; next }
+            /-----END .*PRIVATE KEY-----/ { print "-----END REDACTED PRIVATE KEY-----"; in_pem=0; next }
+            /-----BEGIN CERTIFICATE-----/ { print "-----BEGIN REDACTED CERTIFICATE-----"; in_pem=1; next }
+            /-----END CERTIFICATE-----/ { print "-----END REDACTED CERTIFICATE-----"; in_pem=0; next }
+            in_pem { next }
+            { print }
+        '
 }
 
 print_redacted_file() {
     local file="$1"
 
     echo "===== $file ====="
-    sed -E -e "$REDACT_PATTERN" "$file" 2>/dev/null
+    redact_stream "$file" 2>/dev/null
     echo
 }
 
@@ -175,22 +228,68 @@ grep_files_redacted() {
     done
 }
 
+command_availability_report() {
+    local cmd
+    local commands=(
+        lspci virsh smartctl lsinitrd nmcli podman docker numactl
+        lstopo-no-graphics dnf rpm ip ss journalctl firewall-cmd getenforce
+        sestatus lsmod modinfo qemu-system-x86_64
+    )
+
+    printf '%-24s %s\n' "COMMAND" "PATH"
+    for cmd in "${commands[@]}"; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            printf '%-24s %s\n' "$cmd" "$(command -v "$cmd")"
+        else
+            printf '%-24s %s\n' "$cmd" "missing"
+        fi
+    done
+}
+
+bootloader_config_redacted() {
+    local file path
+    local paths=(
+        /etc/default/grub
+        /etc/grub.d
+        /etc/kernel/cmdline
+        /boot/grub2/grub.cfg
+        /boot/efi/EFI
+    )
+
+    for path in "${paths[@]}"; do
+        [ -e "$path" ] || continue
+        find "$path" -type f -print 2>/dev/null
+    done | sort -u |
+        while IFS= read -r file; do
+            if grep -Eiq "GRUB_CMDLINE|iommu|vfio|acs|nouveau|nvidia|amd_iommu|intel_iommu|rd.driver" "$file" 2>/dev/null; then
+                print_redacted_file "$file"
+            fi
+        done
+}
+
+repo_files_redacted() {
+    grep_files_redacted /etc/yum.repos.d '.*' -maxdepth 1
+}
+
 run_common_post_collection_copies() {
     redact_file /etc/default/grub "$OUTPUT_DIR/kernel/default_grub_redacted.txt"
     copy_if_exists /etc/fstab "$OUTPUT_DIR/storage/fstab.txt"
-
-    if [ "$INCLUDE_SENSITIVE" -eq 1 ]; then
-        copy_if_exists /etc/NetworkManager/system-connections "$OUTPUT_DIR/sensitive/NetworkManager-system-connections"
-        copy_if_exists /etc/modprobe.d "$OUTPUT_DIR/sensitive/modprobe.d"
-        copy_if_exists /etc/dracut.conf.d "$OUTPUT_DIR/sensitive/dracut.conf.d"
-        copy_if_exists /etc/default/grub "$OUTPUT_DIR/sensitive/default-grub"
-        copy_if_exists /etc/fstab "$OUTPUT_DIR/sensitive/fstab"
-    fi
+    copy_if_exists /etc/NetworkManager/system-connections "$OUTPUT_DIR/raw_config/NetworkManager-system-connections"
+    copy_if_exists /etc/modprobe.d "$OUTPUT_DIR/raw_config/modprobe.d"
+    copy_if_exists /etc/dracut.conf.d "$OUTPUT_DIR/raw_config/dracut.conf.d"
+    copy_if_exists /etc/default/grub "$OUTPUT_DIR/raw_config/default-grub"
+    copy_if_exists /etc/grub.d "$OUTPUT_DIR/raw_config/grub.d"
+    copy_if_exists /etc/kernel/cmdline "$OUTPUT_DIR/raw_config/kernel-cmdline"
+    copy_if_exists /boot/grub2/grub.cfg "$OUTPUT_DIR/raw_config/boot-grub2-grub.cfg"
+    copy_if_exists /boot/efi/EFI "$OUTPUT_DIR/raw_config/boot-efi-efi"
+    copy_if_exists /etc/yum.repos.d "$OUTPUT_DIR/raw_config/yum.repos.d"
+    copy_if_exists /etc/fstab "$OUTPUT_DIR/raw_config/fstab"
 }
 
 collect_system_info() {
     capture_cmd "$OUTPUT_DIR/system/date.txt" "DATE" date
     capture_shell "$OUTPUT_DIR/system/os.txt" "OS RELEASE" 'cat /etc/redhat-release 2>/dev/null; cat /etc/os-release 2>/dev/null; uname -a; hostnamectl 2>/dev/null'
+    capture_function "$OUTPUT_DIR/system/command_availability.txt" "COMMAND AVAILABILITY" command_availability_report
 }
 
 collect_kernel_info() {
@@ -200,7 +299,8 @@ collect_kernel_info() {
     capture_shell "$OUTPUT_DIR/kernel/iommu_settings.txt" "IOMMU KERNEL SETTINGS" 'cat /sys/module/intel_iommu/parameters/* 2>/dev/null; cat /sys/module/amd_iommu/parameters/* 2>/dev/null'
     capture_shell "$OUTPUT_DIR/kernel/dracut.txt" "DRACUT" 'ls -la /etc/dracut.conf.d/ 2>&1; echo; grep -RniE "vfio|nouveau|nvidia|pci" /etc/dracut.conf.d/ 2>/dev/null || true'
     capture_shell "$OUTPUT_DIR/kernel/initramfs.txt" "INITRAMFS" 'ls -lh /boot/initramfs-*.img 2>&1'
-    capture_shell "$OUTPUT_DIR/kernel/grub.txt" "GRUB" 'grep -RniE "GRUB_CMDLINE|iommu|vfio|acs|nouveau" /etc/default/grub /etc/grub.d/ 2>/dev/null || true'
+    capture_shell "$OUTPUT_DIR/kernel/grub.txt" "GRUB" 'grep -RniE "GRUB_CMDLINE|iommu|vfio|acs|nouveau" /etc/default/grub /etc/grub.d/ /etc/kernel/cmdline /boot/grub2/grub.cfg /boot/efi/EFI/ 2>/dev/null || true'
+    capture_function "$OUTPUT_DIR/kernel/bootloader_config_redacted.txt" "BOOTLOADER CONFIG REDACTED" bootloader_config_redacted
     capture_function "$OUTPUT_DIR/kernel/module_config.txt" "KERNEL MODULE CONFIG" grep_files_redacted /etc/modprobe.d '.*' -maxdepth 1
 }
 
@@ -354,14 +454,26 @@ smart_summary() {
     done
 }
 
-vm_xml() {
+vm_xml_redacted() {
     local vm
 
     while IFS= read -r vm; do
         [ -n "$vm" ] || continue
         echo "===== VM: $vm ====="
-        virsh dumpxml "$vm" 2>&1
+        virsh dumpxml "$vm" 2>&1 | redact_stream
         echo
+    done < <(virsh list --all --name 2>/dev/null)
+}
+
+vm_xml_raw_files() {
+    local safe_name vm
+    local target_dir="$OUTPUT_DIR/raw_config/libvirt/vms"
+
+    mkdir -p "$target_dir"
+    while IFS= read -r vm; do
+        [ -n "$vm" ] || continue
+        safe_name="$(printf '%s' "$vm" | tr -c '[:alnum:]_.-' '_')"
+        virsh dumpxml "$vm" >"$target_dir/${safe_name}.xml" 2>"$target_dir/${safe_name}.xml.error.txt" || true
     done < <(virsh list --all --name 2>/dev/null)
 }
 
@@ -420,7 +532,8 @@ collect_virtualization_info() {
     capture_shell "$OUTPUT_DIR/virtualization/libvirt.txt" "LIBVIRT" 'virsh version 2>&1; echo; virsh list --all 2>&1; echo; virsh net-list --all 2>&1; echo; virsh pool-list --all 2>&1'
     capture_shell "$OUTPUT_DIR/virtualization/libvirtd_status.txt" "LIBVIRTD STATUS" 'systemctl status libvirtd --no-pager 2>&1'
     capture_shell "$OUTPUT_DIR/virtualization/vfio_related_units.txt" "VFIO QEMU LIBVIRT UNITS" 'systemctl list-unit-files 2>&1 | grep -Ei "vfio|qemu|libvirt" || true'
-    capture_function "$OUTPUT_DIR/virtualization/vm_xml.txt" "VM XML" vm_xml
+    capture_function "$OUTPUT_DIR/virtualization/vm_xml_redacted.txt" "VM XML REDACTED" vm_xml_redacted
+    capture_function "$OUTPUT_DIR/virtualization/vm_xml_raw_files.txt" "VM XML RAW FILES" vm_xml_raw_files
     capture_function "$OUTPUT_DIR/virtualization/vm_pci_devices.txt" "VM PCI DEVICES" vm_pci_devices
     capture_shell "$OUTPUT_DIR/virtualization/qemu.txt" "QEMU PACKAGES" 'qemu-system-x86_64 --version 2>&1; echo; rpm -qa | grep -Ei "qemu|libvirt|virt-install|edk2|ovmf" | sort'
     capture_shell "$OUTPUT_DIR/virtualization/disk_files.txt" "VM DISK FILES" "find /var/lib/libvirt/images /var/lib/libvirt -type f \( -name '*.qcow2' -o -name '*.qcow' -o -name '*.raw' -o -name '*.img' \) -printf '%p %s bytes\n' 2>/dev/null"
@@ -442,6 +555,7 @@ collect_services_info() {
 
 collect_packages_info() {
     capture_cmd "$OUTPUT_DIR/packages/repos.txt" "DNF REPOSITORIES" dnf repolist
+    capture_function "$OUTPUT_DIR/packages/repo_files_redacted.txt" "DNF REPOSITORY FILES REDACTED" repo_files_redacted
     capture_shell "$OUTPUT_DIR/packages/modules.txt" "DNF MODULES" 'dnf module list 2>/dev/null'
     capture_shell "$OUTPUT_DIR/packages/rpm_packages.txt" "INSTALLED PACKAGES" 'rpm -qa | sort'
 }
@@ -458,6 +572,7 @@ collect_logs_info() {
 
 main() {
     parse_args "$@"
+    require_root
     prepare_output_dir
     write_manifest_start
 

@@ -8,26 +8,26 @@ Summary
 - Main language: Bash. Agents should treat files as shell scripts by default.
 - Preferred workflow: make small, incremental Bash changes that keep the script working, then validate them before making broader changes. I prefer smaller fixes over large, untested rewrites.
 - Naming convention: prefer snake_case for filenames and script-level identifiers to remain human-readable (e.g., `collect_info.sh`, `gather_network_info.sh`).
+- `roadmap.md` is a living planning document. Agents should use it as the guide for future improvements, update it when priorities or ideas change, and keep it aligned with completed work.
 - There is intentionally no CI or automated GitHub testing in this repo — do not create CI workflows, GitHub Actions, or other remote testing automation unless explicitly requested by the repo owner.
 
 Linting and checks
 
-- Standard: use ShellCheck for all Bash/shell scripts. Prefer fixing ShellCheck warnings (SCxxxx) before committing.
-- Example local check command:
+- Standard: run ShellCheck only when Bash/shell scripts are edited. Prefer fixing ShellCheck warnings (SCxxxx) before committing script changes.
+- Example local check command for an edited Bash script:
 
 ```bash
 # single script
 shellcheck script.sh
-
-# run over the repo (bash/git-bash / WSL)
-find . -type f -name '*.sh' -print0 | xargs -0 shellcheck
 ```
 
+- If broader Bash changes touch multiple scripts, ShellCheck each edited script. Do not run ShellCheck for documentation-only changes.
 - If you want, I can add a suggested `.shellcheckrc` file with preferred disables/level settings — ask before adding.
 
 Key files
 
 - `scripts/collect-info.sh` — the active information-gathering script in this repo.
+- `roadmap.md` — living guide for planned improvements and follow-up work.
 - Any additional helper scripts or notes should live under `scripts/` and be kept small and focused.
 
 Agent behavior guidelines (concise & actionable)
@@ -35,7 +35,7 @@ Agent behavior guidelines (concise & actionable)
 - Do NOT delete or remove files automatically. The repository owner prefers manual deletions; ask before removing anything.
 - Prefer smaller, validated Bash edits over large, sweeping changes. If a fix works and is scoped, keep it small and confirm it before broadening scope.
 - Preserve original file content when updating: prefer appending a clearly labeled section such as "### edits by agent — YYYY-MM-DD" rather than rewriting files in-place.
-- Follow the ShellCheck standard: run ShellCheck locally and include the exact command you used in the commit message or PR description.
+- Follow the ShellCheck standard only for edited Bash scripts: run ShellCheck locally and include the exact command you used in the commit message or PR description.
 - Do NOT add CI/automation for testing on GitHub or elsewhere unless the owner explicitly requests it.
 - If you need to run scripts or destructive commands, ask the user for approval first. Avoid running remote or privileged commands.
 - When proposing changes, include a short rationale and a one-line verification step the user can run locally (e.g., `shellcheck myscript.sh` or `bash -n myscript.sh`).

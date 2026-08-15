@@ -2,7 +2,7 @@
 
 Rough host information collectors for Rocky Linux 9 / RHEL reinstall planning.
 
-The main script is [scripts/collect_info.sh](scripts/collect_info.sh). It writes a timestamped folder under `collected-info/` with nested topic folders:
+The main script is [scripts/collect-info.sh](scripts/collect-info.sh). It writes a timestamped folder under `collected-info/` with nested topic folders:
 
 - `system/` - OS, date, hostname, release details
 - `kernel/` - kernel version, command line, modules, IOMMU settings, dracut, initramfs, GRUB notes
@@ -17,27 +17,22 @@ The main script is [scripts/collect_info.sh](scripts/collect_info.sh). It writes
 - `containers/` - Podman and Docker state
 - `logs/` - recent boot/kernel warnings
 - `custom/` - targeted searches for GPU/VFIO passthrough customisations
+- `raw_config/` - raw configuration copies for reinstall reference
 
 ## Run
 
 ```bash
-chmod +x scripts/collect_info.sh
-sudo scripts/collect_info.sh
+chmod +x scripts/collect-info.sh
+sudo scripts/collect-info.sh
 ```
 
 Use a custom output directory:
 
 ```bash
-sudo scripts/collect_info.sh --output /root/reinstall-info
+sudo scripts/collect-info.sh --output /root/reinstall-info
 ```
 
-Include raw config copies that may contain secrets:
-
-```bash
-sudo scripts/collect_info.sh --include-sensitive
-```
-
-By default, the script tries to redact obvious passwords, PSKs, keys, tokens, and secrets from text output. Still review files before sharing them.
+Run as root so protected system configuration can be collected. The script also copies raw config files into `raw_config/`, which may contain secrets. Review files before sharing them.
 
 ## GPU/VFIO Notes
 
@@ -58,8 +53,8 @@ For passthrough rebuild notes, start with:
 ## Verify
 
 ```bash
-bash -n scripts/collect_info.sh
-shellcheck scripts/collect_info.sh
+bash -n scripts/collect-info.sh
+shellcheck scripts/collect-info.sh
 ```
 
 There is intentionally no CI in this repository.
